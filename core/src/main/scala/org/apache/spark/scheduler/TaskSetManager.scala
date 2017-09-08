@@ -110,6 +110,8 @@ private[spark] class TaskSetManager(
 
   private[scheduler] val runningTasksSet = new HashSet[Long]
 
+  case class PriorityPartitionsResponse(files: Seq[String])
+
   override def runningTasks: Int = runningTasksSet.size
 
   def someAttemptSucceeded(tid: Long): Boolean = {
@@ -428,13 +430,24 @@ private[spark] class TaskSetManager(
 
   def updatePriorityTasks(): Unit = {
 
+    import org.json4s.JsonDSL._
+    import org.json4s.jackson.JsonMethods.{render, compact, parse}
+    import org.json4s.DefaultFormats
+    implicit val formats = DefaultFormats
+
+
     def responseToString(response: HttpResponse): String = {
       val entity = response.getEntity()
       var content = ""
       if (entity != null) {
         val inputStream = entity.getContent()
-        content = scala.io.Source.fromInputStream(inputStream).getLines.mkString
-        inputStream.close
+        try {
+          content = scala.io.Source.fromInputStream(inputStream).getLines.mkString
+        } catch {
+          case _: java.io.IOException => log.info("Stream was closed")
+        } finally {
+          inputStream.close
+        }
       }
       content
     }
@@ -450,12 +463,15 @@ private[spark] class TaskSetManager(
             case _ => Seq()
           })
 
-    log.warn(partitions.mkString(", "))
+    // log.warn(partitions.mkString(", "))
+    val jsonUpdate = compact(render(("job_id" -> jobId) ~
+                            ("partitions" -> partitions.toSeq)))
+    // log.warn(jsonUpdate)
 
     val httpClient = HttpClientBuilder.create.build
     // Send our partitions.
     val postRequest = new HttpPost(partitionsUrl)
-    val params = new StringEntity("{\"job_id\": 1,\"partitions\": [\"part1\",\"part2\"]} ")
+    val params = new StringEntity(jsonUpdate)
     postRequest.addHeader("content-type", "application/json");
     postRequest.setEntity(params);
     val httpResponsePost = httpClient.execute(postRequest)
@@ -463,7 +479,27 @@ private[spark] class TaskSetManager(
 
     // Get priority partitions
     val httpResponseGet = httpClient.execute(new HttpGet(priorityUrl))
-    log.warn(responseToString(httpResponseGet))
+    // log.warn(responseToString(httpResponseGet))
+    val priorityResponse = parse(responseToString(httpResponseGet))
+    val priorityPartitions = priorityResponse.extract[PriorityPartitionsResponse].files.toSet
+
+    val taskIdxToPromote = tasks.zipWithIndex.map({
+        case (t: ResultTask[_, _], idx)
+          if t.partition.scheduleHints.toSet.union(priorityPartitions).size > 0
+          => idx
+      })
+    log.warn("Indices: " + taskIdxToPromote.mkString(","))
+
+
+    /*
+    val tasksToPromote = tasks.flatMap(
+          _ match {
+            case t: ResultTask[_, _]
+              if Set(t.partition.scheduleHints).union(priorityPartitions).size > 0
+              => Seq(t.id)
+            case _ => Seq()
+          }) */
+
   }
 
 
