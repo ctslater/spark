@@ -26,8 +26,11 @@ trait Partition extends Serializable {
    */
   def index: Int
 
+  def scheduleHints(): Seq[String] = Seq()
+
   // A better default implementation of HashCode
   override def hashCode(): Int = index
 
   override def equals(other: Any): Boolean = super.equals(other)
+
 }

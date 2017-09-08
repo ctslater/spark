@@ -54,7 +54,7 @@ private[spark] class ShuffleMapTask(
     stageId: Int,
     stageAttemptId: Int,
     taskBinary: Broadcast[Array[Byte]],
-    partition: Partition,
+    val partition: Partition,
     @transient private var locs: Seq[TaskLocation],
     localProperties: Properties,
     serializedTaskMetrics: Array[Byte],

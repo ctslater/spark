@@ -53,7 +53,7 @@ private[spark] class ResultTask[T, U](
     stageId: Int,
     stageAttemptId: Int,
     taskBinary: Broadcast[Array[Byte]],
-    partition: Partition,
+    val partition: Partition,
     locs: Seq[TaskLocation],
     val outputId: Int,
     localProperties: Properties,

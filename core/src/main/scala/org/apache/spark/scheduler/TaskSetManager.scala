@@ -22,8 +22,15 @@ import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentLinkedQueue
 
 import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet}
+import scala.io
 import scala.math.max
 import scala.util.control.NonFatal
+
+import org.apache.http.HttpResponse
+import org.apache.http.client.HttpClient
+import org.apache.http.client.methods.{HttpGet, HttpPost}
+import org.apache.http.entity.StringEntity
+import org.apache.http.impl.client.HttpClientBuilder
 
 import org.apache.spark._
 import org.apache.spark.TaskState.TaskState
@@ -419,6 +426,47 @@ private[spark] class TaskSetManager(
       case (taskIndex, allowedLocality) => (taskIndex, allowedLocality, true)}
   }
 
+  def updatePriorityTasks(): Unit = {
+
+    def responseToString(response: HttpResponse): String = {
+      val entity = response.getEntity()
+      var content = ""
+      if (entity != null) {
+        val inputStream = entity.getContent()
+        content = scala.io.Source.fromInputStream(inputStream).getLines.mkString
+        inputStream.close
+      }
+      content
+    }
+
+    val partitionsUrl = "http://127.0.0.1:8080/partitions"
+    val priorityUrl = "http://127.0.0.1:8080/priority"
+
+    val jobId = 0
+
+    val partitions = tasks.flatMap(
+          t => t match {
+            case t: ResultTask[_, _] => t.partition.scheduleHints
+            case _ => Seq()
+          })
+
+    log.warn(partitions.mkString(", "))
+
+    val httpClient = HttpClientBuilder.create.build
+    // Send our partitions.
+    val postRequest = new HttpPost(partitionsUrl)
+    val params = new StringEntity("{\"job_id\": 1,\"partitions\": [\"part1\",\"part2\"]} ")
+    postRequest.addHeader("content-type", "application/json");
+    postRequest.setEntity(params);
+    val httpResponsePost = httpClient.execute(postRequest)
+    log.warn(responseToString(httpResponsePost))
+
+    // Get priority partitions
+    val httpResponseGet = httpClient.execute(new HttpGet(priorityUrl))
+    log.warn(responseToString(httpResponseGet))
+  }
+
+
   /**
    * Respond to an offer of a single executor from the scheduler by finding a task
    *
@@ -437,6 +485,10 @@ private[spark] class TaskSetManager(
       maxLocality: TaskLocality.TaskLocality)
     : Option[TaskDescription] =
   {
+
+    log.warn("Got resourceOffer")
+    updatePriorityTasks()
+
     val offerBlacklisted = taskSetBlacklistHelperOpt.exists { blacklist =>
       blacklist.isNodeBlacklistedForTaskSet(host) ||
         blacklist.isExecutorBlacklistedForTaskSet(execId)
