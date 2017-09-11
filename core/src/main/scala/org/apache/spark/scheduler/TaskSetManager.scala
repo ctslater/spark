@@ -19,6 +19,7 @@ package org.apache.spark.scheduler
 
 import java.io.NotSerializableException
 import java.nio.ByteBuffer
+import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
 
 import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet}
@@ -114,6 +115,8 @@ private[spark] class TaskSetManager(
 
 
   override def runningTasks: Int = runningTasksSet.size
+
+  val taskSetUUID = UUID.randomUUID.toString()
 
   def someAttemptSucceeded(tid: Long): Boolean = {
     successful(taskInfos(tid).index)
@@ -467,7 +470,7 @@ private[spark] class TaskSetManager(
     val partitionsUrl = "http://127.0.0.1:8080/partitions"
     val priorityUrl = "http://127.0.0.1:8080/priority"
 
-    val jobId = 0
+    val jobId = taskSetUUID
 
     val partitions = tasks.zipWithIndex.flatMap( {
           case (t: ResultTask[_, _], idx: Int) if !successful(idx)
@@ -484,8 +487,7 @@ private[spark] class TaskSetManager(
     val params = new StringEntity(jsonUpdate)
     postRequest.addHeader("content-type", "application/json");
     postRequest.setEntity(params);
-    val httpResponsePost =
-    try {
+    val httpResponsePost = try {
       httpClient.execute(postRequest)
     } catch {
       case e: org.apache.http.conn.HttpHostConnectException =>
@@ -495,7 +497,13 @@ private[spark] class TaskSetManager(
     log.warn(responseToString(httpResponsePost))
 
     // Get priority partitions
-    val httpResponseGet = httpClient.execute(new HttpGet(priorityUrl))
+    val httpResponseGet = try {
+      httpClient.execute(new HttpGet(priorityUrl))
+    } catch {
+      case e: org.apache.http.conn.HttpHostConnectException =>
+        log.warn("Could not connect to Conductor")
+        return
+    }
     val strResponse = responseToString(httpResponseGet)
     val priorityResponse = parse(strResponse)
     val priorityPartitions = priorityResponse.extract[PriorityPartitionsResponse].files.toSet
