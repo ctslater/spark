@@ -315,6 +315,7 @@ private[spark] class TaskSetManager(
     : Option[(Int, TaskLocality.Value)] =
   {
     speculatableTasks.retain(index => !successful(index)) // Remove finished tasks from set
+    log.warn("DEQUEUE SPECULATIVE")
 
     def canRunOnHost(index: Int): Boolean = {
       !hasAttemptOnHost(index, host) &&
@@ -393,11 +394,13 @@ private[spark] class TaskSetManager(
     : Option[(Int, TaskLocality.Value, Boolean)] =
   {
     for (index <- dequeueTaskFromList(execId, host, getPendingTasksForExecutor(execId))) {
+      log.info("dequeue PROCESS_LOCAL")
       return Some((index, TaskLocality.PROCESS_LOCAL, false))
     }
 
     if (TaskLocality.isAllowed(maxLocality, TaskLocality.NODE_LOCAL)) {
       for (index <- dequeueTaskFromList(execId, host, getPendingTasksForHost(host))) {
+      log.warn("dequeue NODE_LOCAL")
         return Some((index, TaskLocality.NODE_LOCAL, false))
       }
     }
@@ -405,6 +408,8 @@ private[spark] class TaskSetManager(
     if (TaskLocality.isAllowed(maxLocality, TaskLocality.NO_PREF)) {
       // Look for noPref tasks after NODE_LOCAL for minimize cross-rack traffic
       for (index <- dequeueTaskFromList(execId, host, pendingTasksWithNoPrefs)) {
+      log.warn(s"dequeue PROCESS_LOCAL2 idx ${index}")
+      log.warn(s"dequeue PROCESS_LOCAL2 ${pendingTasksWithNoPrefs}")
         return Some((index, TaskLocality.PROCESS_LOCAL, false))
       }
     }
@@ -414,16 +419,19 @@ private[spark] class TaskSetManager(
         rack <- sched.getRackForHost(host)
         index <- dequeueTaskFromList(execId, host, getPendingTasksForRack(rack))
       } {
+      log.warn("dequeue RACK_LOCAL")
         return Some((index, TaskLocality.RACK_LOCAL, false))
       }
     }
 
     if (TaskLocality.isAllowed(maxLocality, TaskLocality.ANY)) {
       for (index <- dequeueTaskFromList(execId, host, allPendingTasks)) {
+      log.warn("dequeue ANY")
         return Some((index, TaskLocality.ANY, false))
       }
     }
 
+    log.warn("dequeue spec?")
     // find a speculative task if all others tasks have been scheduled
     dequeueSpeculativeTask(execId, host, maxLocality).map {
       case (taskIndex, allowedLocality) => (taskIndex, allowedLocality, true)}
@@ -461,16 +469,14 @@ private[spark] class TaskSetManager(
 
     val jobId = 0
 
-    val partitions = tasks.flatMap(
-          t => t match {
-            case t: ResultTask[_, _] => t.partition.scheduleHints
-            case _ => Seq()
-          })
+    val partitions = tasks.zipWithIndex.flatMap( {
+          case (t: ResultTask[_, _], idx: Int) if !successful(idx)
+             => t.partition.scheduleHints
+          case _ => Seq()
+        })
 
-    // log.warn(partitions.mkString(", "))
     val jsonUpdate = compact(render(("job_id" -> jobId) ~
                             ("partitions" -> partitions.toSeq)))
-    // log.warn(jsonUpdate)
 
     val httpClient = HttpClientBuilder.create.build
     // Send our partitions.
@@ -478,7 +484,14 @@ private[spark] class TaskSetManager(
     val params = new StringEntity(jsonUpdate)
     postRequest.addHeader("content-type", "application/json");
     postRequest.setEntity(params);
-    val httpResponsePost = httpClient.execute(postRequest)
+    val httpResponsePost =
+    try {
+      httpClient.execute(postRequest)
+    } catch {
+      case e: org.apache.http.conn.HttpHostConnectException =>
+        log.warn("Could not connect to Conductor")
+        return
+    }
     log.warn(responseToString(httpResponsePost))
 
     // Get priority partitions
@@ -489,25 +502,33 @@ private[spark] class TaskSetManager(
 
     val taskIdxToPromote = tasks.zipWithIndex.flatMap({
         case (t: ResultTask[_, _], idx: Int)
-          if t.partition.scheduleHints.toSet.intersect(priorityPartitions).size > 0
+          if !successful(idx) &&
+            t.partition.scheduleHints.toSet.intersect(priorityPartitions).size > 0
           => Seq(idx)
         case _ => Seq()
       })
 
-    val pendingTaskSet = allPendingTasks.toSet
-    val activeTasksToPromote = taskIdxToPromote.filter(pendingTaskSet contains _)
-    allPendingTasks.prependAll(activeTasksToPromote)
+    /* This does not comprehensively promote the task in all the possible
+     * lists right now, but it's sufficient for testing.
+     */
+    for (index <- taskIdxToPromote) {
+      for (loc <- tasks(index).preferredLocations) {
+        pendingTasksForHost.get(loc.host).foreach(_ += index)
+      }
+      if (tasks(index).preferredLocations == Nil) {
+        pendingTasksWithNoPrefs += index
+      }
+    }
+    allPendingTasks ++= taskIdxToPromote
 
-    log.warn("Tasks to promote: " + activeTasksToPromote.mkString(","))
+    log.warn("Tasks to promote: " + taskIdxToPromote.mkString(","))
 
+    /* Print the files that get promoted */
     /*
-    val taskHints = tasks.zipWithIndex.map({
-        case (t: ResultTask[_, _], idx: Int) => (idx, t.partition.scheduleHints)
-        case _ => log.info("unmatched task")
-      })
-    log.warn("All Hints: " + taskHints.mkString(","))
+    taskIdxToPromote.map(tasks(_)).foreach({
+      case t: ResultTask[_, _] => log.warn(t.partition.scheduleHints.mkString(","))
+    })
     */
-
 
   }
 
