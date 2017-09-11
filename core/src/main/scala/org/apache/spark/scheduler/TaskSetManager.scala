@@ -39,6 +39,8 @@ import org.apache.spark.scheduler.SchedulingMode._
 import org.apache.spark.util.{AccumulatorV2, Clock, SystemClock, Utils}
 import org.apache.spark.util.collection.MedianHeap
 
+case class PriorityPartitionsResponse(files: Seq[String])
+
 /**
  * Schedules the tasks within a single TaskSet in the TaskSchedulerImpl. This class keeps track of
  * each task, retries tasks if they fail (up to a limited number of times), and
@@ -110,7 +112,6 @@ private[spark] class TaskSetManager(
 
   private[scheduler] val runningTasksSet = new HashSet[Long]
 
-  case class PriorityPartitionsResponse(files: Seq[String])
 
   override def runningTasks: Int = runningTasksSet.size
 
@@ -434,6 +435,9 @@ private[spark] class TaskSetManager(
     import org.json4s.jackson.JsonMethods.{render, compact, parse}
     import org.json4s.DefaultFormats
     implicit val formats = DefaultFormats
+    /* implicit val formats = DefaultFormats.withCompanions(
+      classOf[TaskSetManager.SharedObj] -> TaskSetManager)
+      */
 
 
     def responseToString(response: HttpResponse): String = {
@@ -479,26 +483,31 @@ private[spark] class TaskSetManager(
 
     // Get priority partitions
     val httpResponseGet = httpClient.execute(new HttpGet(priorityUrl))
-    // log.warn(responseToString(httpResponseGet))
-    val priorityResponse = parse(responseToString(httpResponseGet))
+    val strResponse = responseToString(httpResponseGet)
+    val priorityResponse = parse(strResponse)
     val priorityPartitions = priorityResponse.extract[PriorityPartitionsResponse].files.toSet
 
-    val taskIdxToPromote = tasks.zipWithIndex.map({
-        case (t: ResultTask[_, _], idx)
-          if t.partition.scheduleHints.toSet.union(priorityPartitions).size > 0
-          => idx
+    val taskIdxToPromote = tasks.zipWithIndex.flatMap({
+        case (t: ResultTask[_, _], idx: Int)
+          if t.partition.scheduleHints.toSet.intersect(priorityPartitions).size > 0
+          => Seq(idx)
+        case _ => Seq()
       })
-    log.warn("Indices: " + taskIdxToPromote.mkString(","))
 
+    val pendingTaskSet = allPendingTasks.toSet
+    val activeTasksToPromote = taskIdxToPromote.filter(pendingTaskSet contains _)
+    allPendingTasks.prependAll(activeTasksToPromote)
+
+    log.warn("Tasks to promote: " + activeTasksToPromote.mkString(","))
 
     /*
-    val tasksToPromote = tasks.flatMap(
-          _ match {
-            case t: ResultTask[_, _]
-              if Set(t.partition.scheduleHints).union(priorityPartitions).size > 0
-              => Seq(t.id)
-            case _ => Seq()
-          }) */
+    val taskHints = tasks.zipWithIndex.map({
+        case (t: ResultTask[_, _], idx: Int) => (idx, t.partition.scheduleHints)
+        case _ => log.info("unmatched task")
+      })
+    log.warn("All Hints: " + taskHints.mkString(","))
+    */
+
 
   }
 
