@@ -412,7 +412,6 @@ private[spark] class TaskSetManager(
       // Look for noPref tasks after NODE_LOCAL for minimize cross-rack traffic
       for (index <- dequeueTaskFromList(execId, host, pendingTasksWithNoPrefs)) {
       log.warn(s"dequeue PROCESS_LOCAL2 idx ${index}")
-      log.warn(s"dequeue PROCESS_LOCAL2 ${pendingTasksWithNoPrefs}")
         return Some((index, TaskLocality.PROCESS_LOCAL, false))
       }
     }
@@ -472,14 +471,19 @@ private[spark] class TaskSetManager(
 
     val jobId = taskSetUUID
 
+    /* log.warn(tasks.map(t => t.getClass.getName).mkString(", ")) */
+    log.warn(tasks.map(_.getClass.getName).groupBy(identity).mapValues(_.size).mkString(", "))
+
     val partitions = tasks.zipWithIndex.flatMap( {
           case (t: ResultTask[_, _], idx: Int) if !successful(idx)
+             => t.partition.scheduleHints
+          case (t: ShuffleMapTask, idx: Int) if !successful(idx)
              => t.partition.scheduleHints
           case _ => Seq()
         })
 
     val jsonUpdate = compact(render(("job_id" -> jobId) ~
-                            ("partitions" -> partitions.toSeq)))
+                            ("partitions" -> partitions.distinct.toSeq)))
 
     val httpClient = HttpClientBuilder.create.build
     // Send our partitions.
@@ -510,6 +514,10 @@ private[spark] class TaskSetManager(
 
     val taskIdxToPromote = tasks.zipWithIndex.flatMap({
         case (t: ResultTask[_, _], idx: Int)
+          if !successful(idx) &&
+            t.partition.scheduleHints.toSet.intersect(priorityPartitions).size > 0
+          => Seq(idx)
+        case (t: ShuffleMapTask, idx: Int)
           if !successful(idx) &&
             t.partition.scheduleHints.toSet.intersect(priorityPartitions).size > 0
           => Seq(idx)
